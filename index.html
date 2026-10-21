@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Analizzatore della realtà</title>
+<title>Analizzatore della realtà v4</title>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <style>
   :root { --bg:#0a0a0c; --fg:#f2f2f2; --muted:#9a9aa3; --red:#ff2a2a; --panel:rgba(10,10,12,.72); }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
@@ -18,11 +19,19 @@
   #count b, #fcls { color:var(--red); }
   #model { font-size:12px; color:var(--muted); text-align:center; }
   #model b { color:var(--fg); font-weight:600; }
-  #hint { position:fixed; left:0; right:0; bottom:calc(env(safe-area-inset-bottom,0px) + 82px); text-align:center; pointer-events:none; }
+  #dock { position:fixed; left:0; right:0; bottom:0; padding:0 14px 8px; display:flex; flex-direction:column; align-items:center; gap:8px; pointer-events:none; }
+  #hint { text-align:center; }
+  #info { width:100%; max-width:420px; background:var(--panel); backdrop-filter:blur(8px); border-radius:18px; padding:12px 16px; }
+  #info .d { font-size:28px; font-weight:700; letter-spacing:-.02em; }
+  #info .d span { font-size:12px; font-weight:400; color:var(--muted); margin-left:8px; letter-spacing:0; }
+  #info .dims { display:flex; gap:8px; margin:8px 0 6px; }
+  #info .dims div { flex:1; font-size:12px; color:var(--muted); }
+  #info .dims b { display:block; font-size:18px; color:var(--fg); }
+  #info .n { font-size:11px; color:var(--muted); line-height:1.35; }
   #bar { position:fixed; left:0; right:0; bottom:0; padding:12px 14px calc(env(safe-area-inset-bottom,0px) + 14px);
-    display:flex; gap:10px; justify-content:center; }
-  button { font:inherit; font-size:15px; color:var(--fg); background:var(--panel); backdrop-filter:blur(8px);
-    border:1px solid rgba(255,255,255,.18); border-radius:999px; padding:12px 20px; }
+    display:flex; flex-wrap:wrap; gap:8px; justify-content:center; }
+  button { font:inherit; font-size:14px; color:var(--fg); background:var(--panel); backdrop-filter:blur(8px);
+    border:1px solid rgba(255,255,255,.18); border-radius:999px; padding:10px 15px; }
   button:focus-visible { outline:2px solid var(--red); outline-offset:2px; }
   button.primary { background:var(--red); border-color:var(--red); color:#fff; font-weight:600; }
   #msg { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
@@ -36,6 +45,7 @@
 <body>
 <div id="msg">
   <h1>Analizzatore della realtà</h1>
+  <small>Versione 4 · aggancio automatico oltre il 75%, distanza e misure stimate</small>
   <p id="msgtext">Inquadra ciò che ti circonda: gli oggetti riconosciuti vengono cerchiati in rosso, con il loro nome. Toccane uno per metterlo a fuoco.</p>
   <button class="primary" id="start">Attiva la fotocamera</button>
   <small>Modello: EfficientDet-Lite2 (Google MediaPipe), con COCO-SSD MobileNetV2 come riserva.</small>
@@ -52,10 +62,15 @@
   </div>
   <div id="model" class="pill">Modello: <b>–</b></div>
 </div>
-<div id="hint" class="hidden"><span class="pill" id="hinttext">Tocca un oggetto per metterlo a fuoco</span></div>
+<div id="dock" class="hidden">
+  <div id="info" class="hidden"></div>
+  <div id="hint"><span class="pill" id="hinttext"></span></div>
+</div>
 <div id="bar" class="hidden">
   <button id="flip">Cambia camera</button>
   <button id="pause">Pausa</button>
+  <button id="auto">Auto: sì</button>
+  <button id="calib" class="hidden">Calibra</button>
   <button id="release" class="primary hidden">Rilascia</button>
 </div>
 
@@ -68,7 +83,7 @@ const video = $('video'), canvas = $('overlay'), ctx = canvas.getContext('2d');
 let detector = null;            // { name, detect(video) -> [{bbox:[x,y,w,h], class, score}] }
 let stream, facing = 'environment', paused = false, running = false;
 let lastTs = performance.now(), fpsSmooth = 0, lastPreds = [], view = null;
-let focus = null;               // { cls, box, score, lost }
+let focus = null;               // { cls, box, score, lost, dist }
 
 const setStatus = t => { $('msgtext').textContent = t; };
 const withTimeout = (p, ms, label) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(label + ' (timeout)')), ms))]);
@@ -148,7 +163,8 @@ $('start').onclick = async () => {
   }
   $('model').innerHTML = 'Modello: <b>' + detector.name + '</b>';
   $('msg').classList.add('hidden');
-  ['stage', 'hud', 'bar', 'hint'].forEach(i => $(i).classList.remove('hidden'));
+  ['stage', 'hud', 'bar', 'dock'].forEach(i => $(i).classList.remove('hidden'));
+  refreshUI();
   if (!running) { running = true; loop(); }
 };
 
@@ -157,10 +173,10 @@ $('pause').onclick = () => { paused = !paused; $('pause').textContent = paused ?
 $('release').onclick = () => releaseFocus();
 
 /* ---------- Messa a fuoco ---------- */
-function releaseFocus() {
-  focus = null;
-  $('release').classList.add('hidden');
-  $('hinttext').textContent = 'Tocca un oggetto per metterlo a fuoco';
+function releaseFocus(manual = true) {
+  focus = null; candidate = null;
+  if (manual) cooldownUntil = performance.now() + 3000;   // dopo "Rilascia" l'aggancio automatico aspetta 3 s
+  refreshUI();
   $('count').innerHTML = 'Oggetti: <b>' + lastPreds.length + '</b>';
   redraw();
 }
@@ -174,10 +190,7 @@ canvas.addEventListener('pointerdown', ev => {
   const hits = lastPreds.filter(p => vx >= p.bbox[0] && vx <= p.bbox[0] + p.bbox[2] && vy >= p.bbox[1] && vy <= p.bbox[1] + p.bbox[3]);
   if (!hits.length) { $('hinttext').textContent = 'Tocca dentro un rettangolo rosso'; return; }
   hits.sort((a, b) => a.bbox[2] * a.bbox[3] - b.bbox[2] * b.bbox[3]);   // il più piccolo sotto il dito
-  const t = hits[0];
-  focus = { cls: t.class, box: t.bbox.slice(), score: t.score, lost: 0 };
-  $('release').classList.remove('hidden');
-  $('hinttext').textContent = 'Tocca “Rilascia” per tornare a tutti gli oggetti';
+  lockOn(hits[0]);
   redraw();
 });
 
@@ -202,6 +215,88 @@ function track(preds) {
     f.box = f.box.map((v, i) => v * 0.4 + best.bbox[i] * 0.6);   // movimento fluido
     f.score = best.score; f.lost = 0;
   } else f.lost++;
+}
+
+/* ---------- Aggancio automatico, distanza e misure ---------- */
+const AUTO_SCORE = 0.75, FOV_LONG = 67 * Math.PI / 180;   // campo visivo tipico di un iPhone sul lato lungo
+let autoLock = true, cooldownUntil = 0, candidate = null, kf = 1;
+try { const k = parseFloat(localStorage.getItem('ar_kf')); if (k > 0.3 && k < 3) kf = k; } catch (e) {}
+
+// dimensioni tipiche in cm: [lato maggiore, lato medio, lato minore]
+const SIZE = {person:[170,50,25],bicycle:[170,100,55],car:[450,180,150],motorcycle:[210,110,80],bus:[1200,300,250],train:[2500,380,300],truck:[700,300,250],boat:[500,200,100],"traffic light":[100,35,30],"fire hydrant":[75,40,30],"stop sign":[75,75,1],"parking meter":[130,25,20],bench:[150,80,50],bird:[20,15,8],cat:[45,25,20],dog:[60,45,25],horse:[220,160,60],sheep:[120,80,40],cow:[240,140,60],elephant:[550,300,150],bear:[180,100,60],zebra:[230,140,60],giraffe:[500,200,80],backpack:[50,32,18],umbrella:[90,35,10],handbag:[35,28,12],tie:[50,9,1],suitcase:[65,45,25],frisbee:[27,27,3],skis:[170,10,5],snowboard:[155,30,5],"sports ball":[22,22,22],kite:[100,80,3],"baseball bat":[85,7,7],"baseball glove":[30,25,10],skateboard:[80,20,10],surfboard:[210,55,7],"tennis racket":[69,27,3],bottle:[26,7,7],"wine glass":[20,8,8],cup:[10,8,8],fork:[20,3,1],knife:[22,3,1],spoon:[18,4,2],bowl:[16,16,7],banana:[19,4,3],apple:[8,8,8],sandwich:[14,10,6],orange:[8,8,8],broccoli:[18,12,12],carrot:[18,3,3],"hot dog":[18,6,5],pizza:[32,32,3],donut:[10,10,4],cake:[25,25,10],chair:[90,45,45],couch:[200,90,85],"potted plant":[50,25,25],bed:[200,150,45],"dining table":[150,90,75],toilet:[75,70,40],tv:[96,56,6],laptop:[34,24,2],mouse:[11,6,4],remote:[18,5,3],keyboard:[44,14,3],"cell phone":[15,7,1],microwave:[45,35,30],oven:[60,60,55],toaster:[30,18,18],sink:[60,45,20],refrigerator:[180,70,70],book:[23,15,3],clock:[30,30,5],vase:[30,15,15],scissors:[18,8,1],"teddy bear":[40,25,15],"hair drier":[22,20,8],toothbrush:[18,2,2]};
+
+const baseFpx = () => Math.max(video.videoWidth, video.videoHeight) / (2 * Math.tan(FOV_LONG / 2));
+const fmtLen = cm => cm >= 100 ? (cm / 100).toFixed(2).replace('.', ',') + ' m' : (cm >= 10 ? String(Math.round(cm)) : cm.toFixed(1).replace('.', ',')) + ' cm';
+const fmtDist = cm => cm >= 100 ? (cm / 100).toFixed(1).replace('.', ',') + ' m' : Math.round(cm) + ' cm';
+
+function layout() { $('dock').style.bottom = $('bar').offsetHeight + 'px'; }
+addEventListener('resize', layout);
+
+function refreshUI() {
+  $('release').classList.toggle('hidden', !focus);
+  $('calib').classList.toggle('hidden', !focus);
+  $('auto').textContent = 'Auto: ' + (autoLock ? 'sì' : 'no');
+  $('hint').classList.toggle('hidden', !!focus);
+  $('hinttext').textContent = autoLock ? 'Aggancio automatico oltre il 75% · oppure tocca un oggetto' : 'Tocca un oggetto per metterlo a fuoco';
+  if (!focus) $('info').classList.add('hidden');
+  layout();
+}
+
+function lockOn(p) {
+  focus = { cls: p.class, box: p.bbox.slice(), score: p.score, lost: 0, dist: null };
+  candidate = null;
+  refreshUI();
+}
+
+$('auto').onclick = () => { autoLock = !autoLock; candidate = null; refreshUI(); };
+
+$('calib').onclick = () => {
+  if (!focus || !SIZE[focus.cls]) return;
+  const v = prompt('Distanza reale di «' + it(focus.cls) + '» in cm (vuoto = azzera la calibrazione):', '');
+  if (v === null) return;
+  const D = parseFloat(String(v).replace(',', '.'));
+  if (!(D > 0)) kf = 1;
+  else { const longPx = Math.max(focus.box[2], focus.box[3]); kf = Math.min(2.5, Math.max(0.4, D * longPx / (baseFpx() * SIZE[focus.cls][0]))); }
+  focus.dist = null;
+  try { localStorage.setItem('ar_kf', String(kf)); } catch (e) {}
+};
+
+function measure(f) {
+  const t = SIZE[f.cls]; if (!t) return null;
+  const [bx, by, bw, bh] = f.box, vw = video.videoWidth, vh = video.videoHeight;
+  const fpx = baseFpx() * kf, longPx = Math.max(bw, bh, 1), shortPx = Math.min(bw, bh);
+  const raw = fpx * t[0] / longPx;                       // modello a foro stenopeico: distanza = focale × misura reale / misura in pixel
+  f.dist = f.dist ? f.dist * 0.85 + raw * 0.15 : raw;
+  const cm = f.dist / fpx;                               // cm per pixel alla distanza stimata
+  const depth = t[2] * Math.min(1.6, Math.max(0.6, (shortPx * cm) / t[1]));
+  const cut = bx < vw * 0.02 || by < vh * 0.02 || bx + bw > vw * 0.98 || by + bh > vh * 0.98;
+  return { dist: f.dist, h: bh * cm, w: bw * cm, d: depth, cut };
+}
+
+function updateInfo() {
+  const m = measure(focus), box = $('info');
+  if (!m) {
+    box.innerHTML = '<div class="n">Per questo oggetto non ho dimensioni di riferimento: non posso stimare distanza e misure.</div>';
+  } else {
+    box.innerHTML = '<div class="d">' + fmtDist(m.dist) + '<span>distanza · ±' + (kf !== 1 ? '15' : '30') + '%</span></div>' +
+      '<div class="dims"><div><b>' + fmtLen(m.h) + '</b>altezza</div><div><b>' + fmtLen(m.w) + '</b>larghezza</div><div><b>' + fmtLen(m.d) + '</b>profondità</div></div>' +
+      '<div class="n">' + (m.cut ? 'Oggetto tagliato dall’inquadratura: stima poco affidabile. ' : '') +
+      (kf !== 1 ? 'Distanza calibrata. ' : 'Stima basata sulle dimensioni tipiche di questo tipo di oggetto. ') + 'Valori indicativi.</div>';
+  }
+  box.classList.remove('hidden');
+}
+
+function autoLockStep() {
+  if (focus || !autoLock || performance.now() < cooldownUntil) return;
+  const c = lastPreds.filter(p => p.score >= AUTO_SCORE);
+  if (!c.length) { candidate = null; return; }
+  const cx = video.videoWidth / 2, cy = video.videoHeight / 2;
+  const dc = p => Math.hypot(p.bbox[0] + p.bbox[2] / 2 - cx, p.bbox[1] + p.bbox[3] / 2 - cy);
+  c.sort((a, b) => dc(a) - dc(b));                       // sceglie l'oggetto più vicino al centro dell'inquadratura
+  const p = c[0];
+  if (candidate && candidate.cls === p.class && iou(candidate.box, p.bbox) > 0.3) { candidate.n++; candidate.box = p.bbox; }
+  else candidate = { cls: p.class, box: p.bbox, n: 1 };
+  if (candidate.n >= 3) lockOn(p);                       // 3 fotogrammi consecutivi sopra il 75%
 }
 
 /* ---------- Disegno ---------- */
@@ -248,8 +343,10 @@ function redraw() {
     ctx.beginPath(); ctx.rect(0, 0, w, h); ctx.rect(x, y, ww, hh); ctx.fill('evenodd');   // oscura tutto il resto
     ctx.lineWidth = 4; ctx.strokeRect(x, y, ww, hh);
     label(it(focus.cls) + ' ' + Math.round(focus.score * 100) + '%', x, y);
+    updateInfo();
     $('count').innerHTML = 'Fuoco: <span id="fcls">' + it(focus.cls) + '</span>';
   } else {
+    $('info').classList.add('hidden');
     ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(0, 0, w, h);
     ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.font = '600 18px "Avenir Next","Segoe UI",system-ui,sans-serif';
     if (facing === 'user') { ctx.save(); ctx.translate(w / 2, 0); ctx.scale(-1, 1); ctx.translate(-w / 2, 0); }
@@ -264,7 +361,8 @@ async function loop() {
   if (!paused && video.readyState >= 2 && detector) {
     try {
       lastPreds = await detector.detect(video);
-      if (focus) track(lastPreds);
+      if (focus) { track(lastPreds); if (focus.lost > 60) releaseFocus(false); }
+      else autoLockStep();
       redraw();
       const now = performance.now();
       fpsSmooth = fpsSmooth * 0.8 + (1000 / (now - lastTs)) * 0.2; lastTs = now;
