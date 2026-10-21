@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Analizzatore della realtà</title>
+<style>
+  :root { --bg:#0a0a0c; --fg:#f2f2f2; --muted:#9a9aa3; --red:#ff2a2a; --panel:rgba(10,10,12,.72); }
+  * { box-sizing:border-box; }
+  html,body { height:100%; margin:0; background:var(--bg); color:var(--fg);
+    font-family: "Avenir Next", "Segoe UI", system-ui, sans-serif; overflow:hidden; }
+  #stage { position:fixed; inset:0; }
+  video, canvas { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+  #hud { position:fixed; left:0; right:0; top:0; padding:calc(env(safe-area-inset-top,0px) + 12px) 14px 10px;
+    display:flex; justify-content:space-between; align-items:center; gap:10px; pointer-events:none; }
+  .pill { background:var(--panel); backdrop-filter:blur(8px); border-radius:999px; padding:7px 14px; font-size:14px; }
+  #count b { color:var(--red); }
+  #bar { position:fixed; left:0; right:0; bottom:0; padding:12px 14px calc(env(safe-area-inset-bottom,0px) + 14px);
+    display:flex; gap:10px; justify-content:center; }
+  button { font:inherit; font-size:15px; color:var(--fg); background:var(--panel); backdrop-filter:blur(8px);
+    border:1px solid rgba(255,255,255,.18); border-radius:999px; padding:12px 20px; }
+  button:focus-visible { outline:2px solid var(--red); outline-offset:2px; }
+  button.primary { background:var(--red); border-color:var(--red); color:#fff; font-weight:600; }
+  #msg { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
+    text-align:center; padding:32px; gap:18px; background:var(--bg); }
+  #msg h1 { font-size:26px; margin:0; letter-spacing:-.01em; }
+  #msg p { margin:0; color:var(--muted); max-width:34ch; line-height:1.5; }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<div id="msg">
+  <h1>Analizzatore della realtà</h1>
+  <p id="msgtext">Inquadra ciò che ti circonda: gli oggetti riconosciuti vengono cerchiati in rosso, con il loro nome.</p>
+  <button class="primary" id="start">Attiva la fotocamera</button>
+</div>
+
+<div id="stage" class="hidden">
+  <video id="video" playsinline muted autoplay></video>
+  <canvas id="overlay"></canvas>
+</div>
+<div id="hud" class="hidden">
+  <div class="pill" id="count">Oggetti: <b>0</b></div>
+  <div class="pill" id="fps">– fps</div>
+</div>
+<div id="bar" class="hidden">
+  <button id="flip">Cambia camera</button>
+  <button id="pause">Pausa</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+<script>
+const IT = {person:"persona",bicycle:"bicicletta",car:"auto",motorcycle:"moto",airplane:"aereo",bus:"autobus",train:"treno",truck:"camion",boat:"barca","traffic light":"semaforo","fire hydrant":"idrante","stop sign":"segnale di stop","parking meter":"parchimetro",bench:"panchina",bird:"uccello",cat:"gatto",dog:"cane",horse:"cavallo",sheep:"pecora",cow:"mucca",elephant:"elefante",bear:"orso",zebra:"zebra",giraffe:"giraffa",backpack:"zaino",umbrella:"ombrello",handbag:"borsa",tie:"cravatta",suitcase:"valigia",frisbee:"frisbee",skis:"sci",snowboard:"snowboard","sports ball":"pallone",kite:"aquilone","baseball bat":"mazza da baseball","baseball glove":"guanto da baseball",skateboard:"skateboard",surfboard:"tavola da surf","tennis racket":"racchetta da tennis",bottle:"bottiglia","wine glass":"calice",cup:"tazza",fork:"forchetta",knife:"coltello",spoon:"cucchiaio",bowl:"ciotola",banana:"banana",apple:"mela",sandwich:"panino",orange:"arancia",broccoli:"broccoli",carrot:"carota","hot dog":"hot dog",pizza:"pizza",donut:"ciambella",cake:"torta",chair:"sedia",couch:"divano","potted plant":"pianta in vaso",bed:"letto","dining table":"tavolo",toilet:"water",tv:"televisore",laptop:"portatile",mouse:"mouse",remote:"telecomando",keyboard:"tastiera","cell phone":"telefono",microwave:"microonde",oven:"forno",toaster:"tostapane",sink:"lavandino",refrigerator:"frigorifero",book:"libro",clock:"orologio",vase:"vaso",scissors:"forbici","teddy bear":"orsacchiotto","hair drier":"asciugacapelli",toothbrush:"spazzolino"};
+
+const $ = id => document.getElementById(id);
+const video = $('video'), canvas = $('overlay'), ctx = canvas.getContext('2d');
+let model, stream, facing = 'environment', paused = false, running = false;
+let lastTs = performance.now(), fpsSmooth = 0;
+
+async function startCamera() {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+  video.srcObject = stream;
+  video.style.transform = canvas.style.transform = facing === 'user' ? 'scaleX(-1)' : 'none';
+  await video.play();
+}
+
+function fail(text) {
+  $('msgtext').textContent = text;
+  $('start').textContent = 'Riprova';
+  $('start').disabled = false;
+  $('msg').classList.remove('hidden');
+}
+
+$('start').onclick = async () => {
+  $('start').disabled = true;
+  $('start').textContent = 'Caricamento…';
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)
+      throw new Error('nocam');
+    await startCamera();
+    $('msgtext').textContent = 'Carico il modello di riconoscimento…';
+    model = model || await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+  } catch (e) {
+    fail(e.message === 'nocam'
+      ? 'La fotocamera richiede una pagina servita in HTTPS. Apri l’app da un indirizzo https://.'
+      : 'Non riesco ad avviare fotocamera o modello. Consenti l’accesso alla fotocamera e verifica la connessione.');
+    return;
+  }
+  $('msg').classList.add('hidden');
+  ['stage','hud','bar'].forEach(i => $(i).classList.remove('hidden'));
+  if (!running) { running = true; loop(); }
+};
+
+$('flip').onclick = async () => { facing = facing === 'environment' ? 'user' : 'environment'; try { await startCamera(); } catch(e){} };
+$('pause').onclick = () => { paused = !paused; $('pause').textContent = paused ? 'Riprendi' : 'Pausa'; if (paused) video.pause(); else video.play(); };
+
+// maps video pixel coordinates to the canvas, replicating object-fit: cover
+function fit() {
+  const w = canvas.clientWidth, h = canvas.clientHeight, dpr = window.devicePixelRatio || 1;
+  if (canvas.width !== w * dpr || canvas.height !== h * dpr) { canvas.width = w * dpr; canvas.height = h * dpr; }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const s = Math.max(w / vw, h / vh);
+  return { s, ox: (w - vw * s) / 2, oy: (h - vh * s) / 2, w, h };
+}
+
+function draw(preds) {
+  const { s, ox, oy, w, h } = fit();
+  ctx.clearRect(0, 0, w, h);
+  ctx.lineWidth = 3; ctx.font = '600 15px "Avenir Next","Segoe UI",system-ui,sans-serif'; ctx.textBaseline = 'middle';
+  const mirror = facing === 'user';
+  for (const p of preds) {
+    const [bx, by, bw, bh] = p.bbox;
+    const x = bx * s + ox, y = by * s + oy, ww = bw * s, hh = bh * s;
+    ctx.strokeStyle = '#ff2a2a';
+    ctx.strokeRect(x, y, ww, hh);
+    const name = (IT[p.class] || p.class) + ' ' + Math.round(p.score * 100) + '%';
+    const tw = ctx.measureText(name).width + 14, th = 24;
+    const ty = y - th < 0 ? y : y - th;
+    ctx.fillStyle = '#ff2a2a';
+    ctx.fillRect(x - 1.5, ty, tw, th);
+    ctx.fillStyle = '#fff';
+    ctx.save();
+    if (mirror) { ctx.translate(x - 1.5 + tw / 2, 0); ctx.scale(-1, 1); ctx.translate(-(x - 1.5 + tw / 2), 0); }
+    ctx.fillText(name, x + 5, ty + th / 2 + 1);
+    ctx.restore();
+  }
+  $('count').innerHTML = 'Oggetti: <b>' + preds.length + '</b>';
+}
+
+async function loop() {
+  if (!paused && video.readyState >= 2 && model) {
+    try {
+      const preds = (await model.detect(video, 12, 0.5));
+      draw(preds);
+      const now = performance.now();
+      fpsSmooth = fpsSmooth * 0.8 + (1000 / (now - lastTs)) * 0.2; lastTs = now;
+      $('fps').textContent = Math.round(fpsSmooth) + ' fps';
+    } catch (e) {}
+  }
+  requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
