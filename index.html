@@ -6,15 +6,19 @@
 <title>Analizzatore della realtà</title>
 <style>
   :root { --bg:#0a0a0c; --fg:#f2f2f2; --muted:#9a9aa3; --red:#ff2a2a; --panel:rgba(10,10,12,.72); }
-  * { box-sizing:border-box; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html,body { height:100%; margin:0; background:var(--bg); color:var(--fg);
-    font-family: "Avenir Next", "Segoe UI", system-ui, sans-serif; overflow:hidden; }
+    font-family:"Avenir Next","Segoe UI",system-ui,sans-serif; overflow:hidden; }
   #stage { position:fixed; inset:0; }
   video, canvas { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
-  #hud { position:fixed; left:0; right:0; top:0; padding:calc(env(safe-area-inset-top,0px) + 12px) 14px 10px;
-    display:flex; justify-content:space-between; align-items:center; gap:10px; pointer-events:none; }
+  #hud { position:fixed; left:0; right:0; top:0; padding:calc(env(safe-area-inset-top,0px) + 12px) 14px 0;
+    display:flex; flex-direction:column; align-items:center; gap:8px; pointer-events:none; }
+  #row { width:100%; display:flex; justify-content:space-between; gap:10px; }
   .pill { background:var(--panel); backdrop-filter:blur(8px); border-radius:999px; padding:7px 14px; font-size:14px; }
-  #count b { color:var(--red); }
+  #count b, #fcls { color:var(--red); }
+  #model { font-size:12px; color:var(--muted); text-align:center; }
+  #model b { color:var(--fg); font-weight:600; }
+  #hint { position:fixed; left:0; right:0; bottom:calc(env(safe-area-inset-bottom,0px) + 82px); text-align:center; pointer-events:none; }
   #bar { position:fixed; left:0; right:0; bottom:0; padding:12px 14px calc(env(safe-area-inset-bottom,0px) + 14px);
     display:flex; gap:10px; justify-content:center; }
   button { font:inherit; font-size:15px; color:var(--fg); background:var(--panel); backdrop-filter:blur(8px);
@@ -25,14 +29,16 @@
     text-align:center; padding:32px; gap:18px; background:var(--bg); }
   #msg h1 { font-size:26px; margin:0; letter-spacing:-.01em; }
   #msg p { margin:0; color:var(--muted); max-width:34ch; line-height:1.5; }
+  #msg small { color:var(--muted); font-size:12px; max-width:36ch; line-height:1.4; }
   .hidden { display:none !important; }
 </style>
 </head>
 <body>
 <div id="msg">
   <h1>Analizzatore della realtà</h1>
-  <p id="msgtext">Inquadra ciò che ti circonda: gli oggetti riconosciuti vengono cerchiati in rosso, con il loro nome.</p>
+  <p id="msgtext">Inquadra ciò che ti circonda: gli oggetti riconosciuti vengono cerchiati in rosso, con il loro nome. Toccane uno per metterlo a fuoco.</p>
   <button class="primary" id="start">Attiva la fotocamera</button>
+  <small>Modello: EfficientDet-Lite2 (Google MediaPipe), con COCO-SSD MobileNetV2 come riserva.</small>
 </div>
 
 <div id="stage" class="hidden">
@@ -40,24 +46,76 @@
   <canvas id="overlay"></canvas>
 </div>
 <div id="hud" class="hidden">
-  <div class="pill" id="count">Oggetti: <b>0</b></div>
-  <div class="pill" id="fps">– fps</div>
+  <div id="row">
+    <div class="pill" id="count">Oggetti: <b>0</b></div>
+    <div class="pill" id="fps">– fps</div>
+  </div>
+  <div id="model" class="pill">Modello: <b>–</b></div>
 </div>
+<div id="hint" class="hidden"><span class="pill" id="hinttext">Tocca un oggetto per metterlo a fuoco</span></div>
 <div id="bar" class="hidden">
   <button id="flip">Cambia camera</button>
   <button id="pause">Pausa</button>
+  <button id="release" class="primary hidden">Rilascia</button>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
-<script>
+<script type="module">
 const IT = {person:"persona",bicycle:"bicicletta",car:"auto",motorcycle:"moto",airplane:"aereo",bus:"autobus",train:"treno",truck:"camion",boat:"barca","traffic light":"semaforo","fire hydrant":"idrante","stop sign":"segnale di stop","parking meter":"parchimetro",bench:"panchina",bird:"uccello",cat:"gatto",dog:"cane",horse:"cavallo",sheep:"pecora",cow:"mucca",elephant:"elefante",bear:"orso",zebra:"zebra",giraffe:"giraffa",backpack:"zaino",umbrella:"ombrello",handbag:"borsa",tie:"cravatta",suitcase:"valigia",frisbee:"frisbee",skis:"sci",snowboard:"snowboard","sports ball":"pallone",kite:"aquilone","baseball bat":"mazza da baseball","baseball glove":"guanto da baseball",skateboard:"skateboard",surfboard:"tavola da surf","tennis racket":"racchetta da tennis",bottle:"bottiglia","wine glass":"calice",cup:"tazza",fork:"forchetta",knife:"coltello",spoon:"cucchiaio",bowl:"ciotola",banana:"banana",apple:"mela",sandwich:"panino",orange:"arancia",broccoli:"broccoli",carrot:"carota","hot dog":"hot dog",pizza:"pizza",donut:"ciambella",cake:"torta",chair:"sedia",couch:"divano","potted plant":"pianta in vaso",bed:"letto","dining table":"tavolo",toilet:"water",tv:"televisore",laptop:"portatile",mouse:"mouse",remote:"telecomando",keyboard:"tastiera","cell phone":"telefono",microwave:"microonde",oven:"forno",toaster:"tostapane",sink:"lavandino",refrigerator:"frigorifero",book:"libro",clock:"orologio",vase:"vaso",scissors:"forbici","teddy bear":"orsacchiotto","hair drier":"asciugacapelli",toothbrush:"spazzolino"};
+const it = c => IT[c] || c;
 
 const $ = id => document.getElementById(id);
 const video = $('video'), canvas = $('overlay'), ctx = canvas.getContext('2d');
-let model, stream, facing = 'environment', paused = false, running = false;
-let lastTs = performance.now(), fpsSmooth = 0;
+let detector = null;            // { name, detect(video) -> [{bbox:[x,y,w,h], class, score}] }
+let stream, facing = 'environment', paused = false, running = false;
+let lastTs = performance.now(), fpsSmooth = 0, lastPreds = [], view = null;
+let focus = null;               // { cls, box, score, lost }
 
+const setStatus = t => { $('msgtext').textContent = t; };
+const withTimeout = (p, ms, label) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(label + ' (timeout)')), ms))]);
+const loadScript = src => new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => rej(new Error('script non caricato')); document.head.appendChild(s); });
+
+/* ---------- Modelli ---------- */
+async function loadMediaPipe() {
+  setStatus('Carico EfficientDet-Lite2…');
+  const base = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+  const { FilesetResolver, ObjectDetector } = await withTimeout(import(base + '/vision_bundle.mjs'), 20000, 'libreria MediaPipe');
+  const fileset = await withTimeout(FilesetResolver.forVisionTasks(base + '/wasm'), 20000, 'motore MediaPipe');
+  const modelUrl = 'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite2/float32/1/efficientdet_lite2.tflite';
+  const make = delegate => ObjectDetector.createFromOptions(fileset, {
+    baseOptions: { modelAssetPath: modelUrl, delegate },
+    scoreThreshold: 0.35, maxResults: 20, runningMode: 'VIDEO' });
+  let od;
+  try { od = await withTimeout(make('GPU'), 45000, 'download modello GPU'); }
+  catch (e) { od = await withTimeout(make('CPU'), 60000, 'download modello'); }
+  return {
+    name: 'EfficientDet-Lite2 · MediaPipe',
+    detect: v => od.detectForVideo(v, performance.now()).detections.map(d => ({
+      bbox: [d.boundingBox.originX, d.boundingBox.originY, d.boundingBox.width, d.boundingBox.height],
+      class: d.categories[0].categoryName, score: d.categories[0].score }))
+  };
+}
+
+async function loadCocoSsd() {
+  setStatus('Carico il modello di riserva COCO-SSD…');
+  await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js');
+  await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js');
+  let ok = false;
+  try { ok = await withTimeout(tf.setBackend('webgl'), 8000, 'webgl'); } catch (e) {}
+  if (!ok) await tf.setBackend('cpu');
+  await tf.ready();
+  const m = await withTimeout(cocoSsd.load({ base: 'mobilenet_v2' }), 60000, 'download modello');
+  return {
+    name: 'COCO-SSD · MobileNetV2 (riserva)',
+    detect: async v => (await m.detect(v, 20, 0.35)).map(p => ({ bbox: p.bbox, class: p.class, score: p.score }))
+  };
+}
+
+async function loadDetector() {
+  try { return await loadMediaPipe(); }
+  catch (e) { console.warn('MediaPipe non disponibile:', e); return await loadCocoSsd(); }
+}
+
+/* ---------- Fotocamera ---------- */
 async function startCamera() {
   if (stream) stream.getTracks().forEach(t => t.stop());
   stream = await navigator.mediaDevices.getUserMedia({
@@ -68,38 +126,18 @@ async function startCamera() {
 }
 
 function fail(text) {
-  $('msgtext').textContent = text;
+  setStatus(text);
   $('start').textContent = 'Riprova';
   $('start').disabled = false;
   $('msg').classList.remove('hidden');
-}
-
-const setStatus = t => { $('msgtext').textContent = t; };
-const withTimeout = (p, ms, label) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(label + ' (timeout)')), ms))]);
-
-async function loadModel() {
-  setStatus('Preparo il motore AI…');
-  let ok = false;
-  try { ok = await withTimeout(tf.setBackend('webgl'), 8000, 'webgl'); } catch (e) { ok = false; }
-  if (!ok) { await tf.setBackend('cpu'); }
-  await tf.ready();
-  setStatus('Scarico il modello di riconoscimento…');
-  const m = await withTimeout(cocoSsd.load({ base: 'lite_mobilenet_v2' }), 45000, 'download modello');
-  setStatus('Ultimo passaggio…');
-  const z = tf.zeros([300, 300, 3], 'int32');
-  try { await withTimeout(m.detect(z, 1, 0.9), 30000, 'avvio modello'); } finally { z.dispose(); }
-  return m;
 }
 
 $('start').onclick = async () => {
   $('start').disabled = true;
   $('start').textContent = 'Caricamento…';
   try {
-    if (typeof tf === 'undefined' || typeof cocoSsd === 'undefined')
-      throw new Error('Librerie AI non caricate: controlla la connessione');
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)
-      throw new Error('nocam');
-    model = model || await loadModel();
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('nocam');
+    detector = detector || await loadDetector();
     setStatus('Avvio la fotocamera…');
     await startCamera();
   } catch (e) {
@@ -108,57 +146,130 @@ $('start').onclick = async () => {
       : 'Errore: ' + (e && e.message ? e.message : e));
     return;
   }
+  $('model').innerHTML = 'Modello: <b>' + detector.name + '</b>';
   $('msg').classList.add('hidden');
-  ['stage','hud','bar'].forEach(i => $(i).classList.remove('hidden'));
+  ['stage', 'hud', 'bar', 'hint'].forEach(i => $(i).classList.remove('hidden'));
   if (!running) { running = true; loop(); }
 };
 
-$('flip').onclick = async () => { facing = facing === 'environment' ? 'user' : 'environment'; try { await startCamera(); } catch(e){} };
+$('flip').onclick = async () => { facing = facing === 'environment' ? 'user' : 'environment'; releaseFocus(); try { await startCamera(); } catch (e) {} };
 $('pause').onclick = () => { paused = !paused; $('pause').textContent = paused ? 'Riprendi' : 'Pausa'; if (paused) video.pause(); else video.play(); };
+$('release').onclick = () => releaseFocus();
 
-// maps video pixel coordinates to the canvas, replicating object-fit: cover
+/* ---------- Messa a fuoco ---------- */
+function releaseFocus() {
+  focus = null;
+  $('release').classList.add('hidden');
+  $('hinttext').textContent = 'Tocca un oggetto per metterlo a fuoco';
+  $('count').innerHTML = 'Oggetti: <b>' + lastPreds.length + '</b>';
+  redraw();
+}
+
+canvas.addEventListener('pointerdown', ev => {
+  if (!view) return;
+  const r = canvas.getBoundingClientRect();
+  let x = ev.clientX - r.left; const y = ev.clientY - r.top;
+  if (facing === 'user') x = r.width - x;                       // canvas speculare
+  const vx = (x - view.ox) / view.s, vy = (y - view.oy) / view.s;   // coordinate video
+  const hits = lastPreds.filter(p => vx >= p.bbox[0] && vx <= p.bbox[0] + p.bbox[2] && vy >= p.bbox[1] && vy <= p.bbox[1] + p.bbox[3]);
+  if (!hits.length) { $('hinttext').textContent = 'Tocca dentro un rettangolo rosso'; return; }
+  hits.sort((a, b) => a.bbox[2] * a.bbox[3] - b.bbox[2] * b.bbox[3]);   // il più piccolo sotto il dito
+  const t = hits[0];
+  focus = { cls: t.class, box: t.bbox.slice(), score: t.score, lost: 0 };
+  $('release').classList.remove('hidden');
+  $('hinttext').textContent = 'Tocca “Rilascia” per tornare a tutti gli oggetti';
+  redraw();
+});
+
+function iou(a, b) {
+  const x1 = Math.max(a[0], b[0]), y1 = Math.max(a[1], b[1]);
+  const x2 = Math.min(a[0] + a[2], b[0] + b[2]), y2 = Math.min(a[1] + a[3], b[1] + b[3]);
+  const i = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  return i / (a[2] * a[3] + b[2] * b[3] - i || 1);
+}
+
+function track(preds) {
+  const f = focus, fc = [f.box[0] + f.box[2] / 2, f.box[1] + f.box[3] / 2], span = Math.max(f.box[2], f.box[3]);
+  let best = null, bs = -1;
+  for (const p of preds) {
+    if (p.class !== f.cls) continue;
+    const pc = [p.bbox[0] + p.bbox[2] / 2, p.bbox[1] + p.bbox[3] / 2];
+    const d = Math.hypot(pc[0] - fc[0], pc[1] - fc[1]) / span;
+    const sc = iou(p.bbox, f.box) + (d < 1 ? (1 - d) * 0.3 : 0) + p.score * 0.05;
+    if (sc > bs) { bs = sc; best = p; }
+  }
+  if (best && (bs > 0.12 || f.lost > 12)) {
+    f.box = f.box.map((v, i) => v * 0.4 + best.bbox[i] * 0.6);   // movimento fluido
+    f.score = best.score; f.lost = 0;
+  } else f.lost++;
+}
+
+/* ---------- Disegno ---------- */
 function fit() {
   const w = canvas.clientWidth, h = canvas.clientHeight, dpr = window.devicePixelRatio || 1;
   if (canvas.width !== w * dpr || canvas.height !== h * dpr) { canvas.width = w * dpr; canvas.height = h * dpr; }
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  const vw = video.videoWidth, vh = video.videoHeight;
-  const s = Math.max(w / vw, h / vh);
+  const vw = video.videoWidth || 1, vh = video.videoHeight || 1, s = Math.max(w / vw, h / vh);
   return { s, ox: (w - vw * s) / 2, oy: (h - vh * s) / 2, w, h };
 }
 
-function draw(preds) {
-  const { s, ox, oy, w, h } = fit();
+function label(text, x, y) {
+  const tw = ctx.measureText(text).width + 14, th = 24, ty = y - th < 0 ? y : y - th;
+  ctx.fillStyle = '#ff2a2a'; ctx.fillRect(x - 1.5, ty, tw, th);
+  ctx.fillStyle = '#fff';
+  ctx.save();
+  if (facing === 'user') { const cx = x - 1.5 + tw / 2; ctx.translate(cx, 0); ctx.scale(-1, 1); ctx.translate(-cx, 0); }
+  ctx.fillText(text, x + 5, ty + th / 2 + 1);
+  ctx.restore();
+}
+
+function redraw() {
+  view = fit();
+  const { s, ox, oy, w, h } = view;
   ctx.clearRect(0, 0, w, h);
-  ctx.lineWidth = 3; ctx.font = '600 15px "Avenir Next","Segoe UI",system-ui,sans-serif'; ctx.textBaseline = 'middle';
-  const mirror = facing === 'user';
-  for (const p of preds) {
-    const [bx, by, bw, bh] = p.bbox;
-    const x = bx * s + ox, y = by * s + oy, ww = bw * s, hh = bh * s;
-    ctx.strokeStyle = '#ff2a2a';
-    ctx.strokeRect(x, y, ww, hh);
-    const name = (IT[p.class] || p.class) + ' ' + Math.round(p.score * 100) + '%';
-    const tw = ctx.measureText(name).width + 14, th = 24;
-    const ty = y - th < 0 ? y : y - th;
-    ctx.fillStyle = '#ff2a2a';
-    ctx.fillRect(x - 1.5, ty, tw, th);
-    ctx.fillStyle = '#fff';
-    ctx.save();
-    if (mirror) { ctx.translate(x - 1.5 + tw / 2, 0); ctx.scale(-1, 1); ctx.translate(-(x - 1.5 + tw / 2), 0); }
-    ctx.fillText(name, x + 5, ty + th / 2 + 1);
-    ctx.restore();
+  ctx.font = '600 15px "Avenir Next","Segoe UI",system-ui,sans-serif'; ctx.textBaseline = 'middle';
+  ctx.strokeStyle = '#ff2a2a';
+
+  if (!focus) {
+    ctx.lineWidth = 3;
+    const shown = lastPreds.filter(p => p.score >= 0.5);
+    for (const p of shown) {
+      const [bx, by, bw, bh] = p.bbox;
+      ctx.strokeRect(bx * s + ox, by * s + oy, bw * s, bh * s);
+      label(it(p.class) + ' ' + Math.round(p.score * 100) + '%', bx * s + ox, by * s + oy);
+    }
+    $('count').innerHTML = 'Oggetti: <b>' + shown.length + '</b>';
+    return;
   }
-  $('count').innerHTML = 'Oggetti: <b>' + preds.length + '</b>';
+
+  if (focus.lost <= 8) {
+    const [bx, by, bw, bh] = focus.box, x = bx * s + ox, y = by * s + oy, ww = bw * s, hh = bh * s;
+    ctx.fillStyle = 'rgba(0,0,0,.62)';
+    ctx.beginPath(); ctx.rect(0, 0, w, h); ctx.rect(x, y, ww, hh); ctx.fill('evenodd');   // oscura tutto il resto
+    ctx.lineWidth = 4; ctx.strokeRect(x, y, ww, hh);
+    label(it(focus.cls) + ' ' + Math.round(focus.score * 100) + '%', x, y);
+    $('count').innerHTML = 'Fuoco: <span id="fcls">' + it(focus.cls) + '</span>';
+  } else {
+    ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.font = '600 18px "Avenir Next","Segoe UI",system-ui,sans-serif';
+    if (facing === 'user') { ctx.save(); ctx.translate(w / 2, 0); ctx.scale(-1, 1); ctx.translate(-w / 2, 0); }
+    ctx.fillText('Cerco: ' + it(focus.cls) + '…', w / 2, h / 2);
+    if (facing === 'user') ctx.restore();
+    ctx.textAlign = 'start';
+    $('count').innerHTML = 'Cerco: <span id="fcls">' + it(focus.cls) + '</span>';
+  }
 }
 
 async function loop() {
-  if (!paused && video.readyState >= 2 && model) {
+  if (!paused && video.readyState >= 2 && detector) {
     try {
-      const preds = (await model.detect(video, 12, 0.5));
-      draw(preds);
+      lastPreds = await detector.detect(video);
+      if (focus) track(lastPreds);
+      redraw();
       const now = performance.now();
       fpsSmooth = fpsSmooth * 0.8 + (1000 / (now - lastTs)) * 0.2; lastTs = now;
       $('fps').textContent = Math.round(fpsSmooth) + ' fps';
-    } catch (e) {}
+    } catch (e) { console.warn(e); }
   }
   requestAnimationFrame(loop);
 }
