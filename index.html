@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Analizzatore della realtà v4</title>
+<title>Analizzatore della realtà v5</title>
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <style>
   :root { --bg:#0a0a0c; --fg:#f2f2f2; --muted:#9a9aa3; --red:#ff2a2a; --panel:rgba(10,10,12,.72); }
@@ -45,10 +45,10 @@
 <body>
 <div id="msg">
   <h1>Analizzatore della realtà</h1>
-  <small>Versione 4 · aggancio automatico oltre il 75%, distanza e misure stimate</small>
+  <small>Versione 5 · vocabolario esteso con database oggetti.json</small>
   <p id="msgtext">Inquadra ciò che ti circonda: gli oggetti riconosciuti vengono cerchiati in rosso, con il loro nome. Toccane uno per metterlo a fuoco.</p>
   <button class="primary" id="start">Attiva la fotocamera</button>
-  <small>Modello: EfficientDet-Lite2 (Google MediaPipe), con COCO-SSD MobileNetV2 come riserva.</small>
+  <small>Modello: EfficientDet-Lite2 + EfficientNet-Lite0 (Google MediaPipe), con COCO-SSD come riserva. Nomi e misure da oggetti.json.</small>
 </div>
 
 <div id="stage" class="hidden">
@@ -76,7 +76,20 @@
 
 <script type="module">
 const IT = {person:"persona",bicycle:"bicicletta",car:"auto",motorcycle:"moto",airplane:"aereo",bus:"autobus",train:"treno",truck:"camion",boat:"barca","traffic light":"semaforo","fire hydrant":"idrante","stop sign":"segnale di stop","parking meter":"parchimetro",bench:"panchina",bird:"uccello",cat:"gatto",dog:"cane",horse:"cavallo",sheep:"pecora",cow:"mucca",elephant:"elefante",bear:"orso",zebra:"zebra",giraffe:"giraffa",backpack:"zaino",umbrella:"ombrello",handbag:"borsa",tie:"cravatta",suitcase:"valigia",frisbee:"frisbee",skis:"sci",snowboard:"snowboard","sports ball":"pallone",kite:"aquilone","baseball bat":"mazza da baseball","baseball glove":"guanto da baseball",skateboard:"skateboard",surfboard:"tavola da surf","tennis racket":"racchetta da tennis",bottle:"bottiglia","wine glass":"calice",cup:"tazza",fork:"forchetta",knife:"coltello",spoon:"cucchiaio",bowl:"ciotola",banana:"banana",apple:"mela",sandwich:"panino",orange:"arancia",broccoli:"broccoli",carrot:"carota","hot dog":"hot dog",pizza:"pizza",donut:"ciambella",cake:"torta",chair:"sedia",couch:"divano","potted plant":"pianta in vaso",bed:"letto","dining table":"tavolo",toilet:"water",tv:"televisore",laptop:"portatile",mouse:"mouse",remote:"telecomando",keyboard:"tastiera","cell phone":"telefono",microwave:"microonde",oven:"forno",toaster:"tostapane",sink:"lavandino",refrigerator:"frigorifero",book:"libro",clock:"orologio",vase:"vaso",scissors:"forbici","teddy bear":"orsacchiotto","hair drier":"asciugacapelli",toothbrush:"spazzolino"};
-const it = c => IT[c] || c;
+const ALIAS = {}; let trCache = {};
+try { trCache = JSON.parse(localStorage.getItem('ar_tr') || '{}'); } catch (e) {}
+const key = c => { c = String(c).toLowerCase(); return ALIAS[c] || c; };
+const it = c => { const k = key(c); return IT[k] || trCache[k] || (translate(k), c); };
+function translate(k) {   // nome assente dal database: traduzione gratuita (MyMemory), salvata sul telefono
+  if (trCache[k] !== undefined || translate.busy.has(k)) return;
+  translate.busy.add(k);
+  fetch('https://api.mymemory.translated.net/get?q=' + encodeURIComponent(k) + '&langpair=en|it')
+    .then(r => r.json()).then(j => {
+      const t = j && j.responseData && j.responseData.translatedText;
+      if (t && !/MYMEMORY|QUERY/i.test(t)) { trCache[k] = t.toLowerCase(); try { localStorage.setItem('ar_tr', JSON.stringify(trCache)); } catch (e) {} }
+    }).catch(() => {});
+}
+translate.busy = new Set();
 
 const $ = id => document.getElementById(id);
 const video = $('video'), canvas = $('overlay'), ctx = canvas.getContext('2d');
@@ -93,7 +106,7 @@ const loadScript = src => new Promise((res, rej) => { const s = document.createE
 async function loadMediaPipe() {
   setStatus('Carico EfficientDet-Lite2…');
   const base = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
-  const { FilesetResolver, ObjectDetector } = await withTimeout(import(base + '/vision_bundle.mjs'), 20000, 'libreria MediaPipe');
+  const { FilesetResolver, ObjectDetector, ImageClassifier } = await withTimeout(import(base + '/vision_bundle.mjs'), 20000, 'libreria MediaPipe');
   const fileset = await withTimeout(FilesetResolver.forVisionTasks(base + '/wasm'), 20000, 'motore MediaPipe');
   const modelUrl = 'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite2/float32/1/efficientdet_lite2.tflite';
   const make = delegate => ObjectDetector.createFromOptions(fileset, {
@@ -102,8 +115,23 @@ async function loadMediaPipe() {
   let od;
   try { od = await withTimeout(make('GPU'), 45000, 'download modello GPU'); }
   catch (e) { od = await withTimeout(make('CPU'), 60000, 'download modello'); }
+  let clf = null;       // secondo stadio: 1000 categorie ImageNet sul ritaglio dell'oggetto agganciato
+  try {
+    clf = await withTimeout(ImageClassifier.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/image_classifier/efficientnet_lite0/float32/1/efficientnet_lite0.tflite' },
+      maxResults: 3, runningMode: 'IMAGE' }), 30000, 'classificatore');
+  } catch (e) { console.warn('Classificatore non disponibile', e); }
+  const cv = document.createElement('canvas'); cv.width = cv.height = 224;
+  const cx = cv.getContext('2d');
   return {
-    name: 'EfficientDet-Lite2 · MediaPipe',
+    name: 'EfficientDet-Lite2' + (clf ? ' + EfficientNet-Lite0' : '') + ' · MediaPipe',
+    classify: clf ? (v, b) => {
+      const m = 0.08, x = Math.max(0, b[0] - b[2] * m), y = Math.max(0, b[1] - b[3] * m);
+      const w = Math.min(v.videoWidth - x, b[2] * (1 + 2 * m)), h = Math.min(v.videoHeight - y, b[3] * (1 + 2 * m));
+      cx.drawImage(v, x, y, w, h, 0, 0, 224, 224);
+      const c = clf.classify(cv).classifications[0].categories[0];
+      return { label: c.categoryName, score: c.score };
+    } : null,
     detect: v => od.detectForVideo(v, performance.now()).detections.map(d => ({
       bbox: [d.boundingBox.originX, d.boundingBox.originY, d.boundingBox.width, d.boundingBox.height],
       class: d.categories[0].categoryName, score: d.categories[0].score }))
@@ -153,6 +181,7 @@ $('start').onclick = async () => {
   try {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('nocam');
     detector = detector || await loadDetector();
+    dbCount = await loadDB();
     setStatus('Avvio la fotocamera…');
     await startCamera();
   } catch (e) {
@@ -161,7 +190,7 @@ $('start').onclick = async () => {
       : 'Errore: ' + (e && e.message ? e.message : e));
     return;
   }
-  $('model').innerHTML = 'Modello: <b>' + detector.name + '</b>';
+  $('model').innerHTML = 'Modello: <b>' + detector.name + '</b> · database: ' + (dbCount ? dbCount + ' voci' : 'integrato');
   $('msg').classList.add('hidden');
   ['stage', 'hud', 'bar', 'dock'].forEach(i => $(i).classList.remove('hidden'));
   refreshUI();
@@ -225,6 +254,32 @@ try { const k = parseFloat(localStorage.getItem('ar_kf')); if (k > 0.3 && k < 3)
 // dimensioni tipiche in cm: [lato maggiore, lato medio, lato minore]
 const SIZE = {person:[170,50,25],bicycle:[170,100,55],car:[450,180,150],motorcycle:[210,110,80],bus:[1200,300,250],train:[2500,380,300],truck:[700,300,250],boat:[500,200,100],"traffic light":[100,35,30],"fire hydrant":[75,40,30],"stop sign":[75,75,1],"parking meter":[130,25,20],bench:[150,80,50],bird:[20,15,8],cat:[45,25,20],dog:[60,45,25],horse:[220,160,60],sheep:[120,80,40],cow:[240,140,60],elephant:[550,300,150],bear:[180,100,60],zebra:[230,140,60],giraffe:[500,200,80],backpack:[50,32,18],umbrella:[90,35,10],handbag:[35,28,12],tie:[50,9,1],suitcase:[65,45,25],frisbee:[27,27,3],skis:[170,10,5],snowboard:[155,30,5],"sports ball":[22,22,22],kite:[100,80,3],"baseball bat":[85,7,7],"baseball glove":[30,25,10],skateboard:[80,20,10],surfboard:[210,55,7],"tennis racket":[69,27,3],bottle:[26,7,7],"wine glass":[20,8,8],cup:[10,8,8],fork:[20,3,1],knife:[22,3,1],spoon:[18,4,2],bowl:[16,16,7],banana:[19,4,3],apple:[8,8,8],sandwich:[14,10,6],orange:[8,8,8],broccoli:[18,12,12],carrot:[18,3,3],"hot dog":[18,6,5],pizza:[32,32,3],donut:[10,10,4],cake:[25,25,10],chair:[90,45,45],couch:[200,90,85],"potted plant":[50,25,25],bed:[200,150,45],"dining table":[150,90,75],toilet:[75,70,40],tv:[96,56,6],laptop:[34,24,2],mouse:[11,6,4],remote:[18,5,3],keyboard:[44,14,3],"cell phone":[15,7,1],microwave:[45,35,30],oven:[60,60,55],toaster:[30,18,18],sink:[60,45,20],refrigerator:[180,70,70],book:[23,15,3],clock:[30,30,5],vase:[30,15,15],scissors:[18,8,1],"teddy bear":[40,25,15],"hair drier":[22,20,8],toothbrush:[18,2,2]};
 
+let dbCount = 0, lastRefine = 0;
+const sizeOf = f => (f.ref && SIZE[key(f.ref)]) || SIZE[key(f.cls)];
+
+async function loadDB() {   // database esterno: oggetti.json accanto a questa pagina
+  try {
+    const j = await withTimeout(fetch('oggetti.json?v=' + Date.now(), { cache: 'no-store' }).then(r => r.json()), 8000, 'database');
+    for (const [k, e] of Object.entries(j.oggetti || {})) {
+      const kk = k.toLowerCase();
+      if (e.it) IT[kk] = e.it;
+      if (e.size) SIZE[kk] = e.size;
+      (e.alias || []).forEach(a => { ALIAS[a.toLowerCase()] = kk; });
+    }
+    return Object.keys(j.oggetti || {}).length;
+  } catch (e) { console.warn('oggetti.json non caricato', e); return 0; }
+}
+
+function refine() {         // ogni 0,8 s riclassifica il ritaglio dell'oggetto agganciato
+  if (!focus || !detector.classify || focus.cls === 'person' || performance.now() - lastRefine < 800) return;
+  lastRefine = performance.now();
+  try {
+    const r = detector.classify(video, focus.box);
+    if (r.score >= 0.45) { focus.ref = key(r.label); focus.refLabel = r.label; focus.refScore = r.score; it(r.label); }
+    else focus.ref = null;
+  } catch (e) {}
+}
+
 const baseFpx = () => Math.max(video.videoWidth, video.videoHeight) / (2 * Math.tan(FOV_LONG / 2));
 const fmtLen = cm => cm >= 100 ? (cm / 100).toFixed(2).replace('.', ',') + ' m' : (cm >= 10 ? String(Math.round(cm)) : cm.toFixed(1).replace('.', ',')) + ' cm';
 const fmtDist = cm => cm >= 100 ? (cm / 100).toFixed(1).replace('.', ',') + ' m' : Math.round(cm) + ' cm';
@@ -251,18 +306,18 @@ function lockOn(p) {
 $('auto').onclick = () => { autoLock = !autoLock; candidate = null; refreshUI(); };
 
 $('calib').onclick = () => {
-  if (!focus || !SIZE[focus.cls]) return;
+  if (!focus || !sizeOf(focus)) return;
   const v = prompt('Distanza reale di «' + it(focus.cls) + '» in cm (vuoto = azzera la calibrazione):', '');
   if (v === null) return;
   const D = parseFloat(String(v).replace(',', '.'));
   if (!(D > 0)) kf = 1;
-  else { const longPx = Math.max(focus.box[2], focus.box[3]); kf = Math.min(2.5, Math.max(0.4, D * longPx / (baseFpx() * SIZE[focus.cls][0]))); }
+  else { const longPx = Math.max(focus.box[2], focus.box[3]); kf = Math.min(2.5, Math.max(0.4, D * longPx / (baseFpx() * sizeOf(focus)[0]))); }
   focus.dist = null;
   try { localStorage.setItem('ar_kf', String(kf)); } catch (e) {}
 };
 
 function measure(f) {
-  const t = SIZE[f.cls]; if (!t) return null;
+  const t = sizeOf(f); if (!t) return null;
   const [bx, by, bw, bh] = f.box, vw = video.videoWidth, vh = video.videoHeight;
   const fpx = baseFpx() * kf, longPx = Math.max(bw, bh, 1), shortPx = Math.min(bw, bh);
   const raw = fpx * t[0] / longPx;                       // modello a foro stenopeico: distanza = focale × misura reale / misura in pixel
@@ -276,10 +331,11 @@ function measure(f) {
 function updateInfo() {
   const m = measure(focus), box = $('info');
   if (!m) {
-    box.innerHTML = '<div class="n">Per questo oggetto non ho dimensioni di riferimento: non posso stimare distanza e misure.</div>';
+    box.innerHTML = '<div class="n">Per questo oggetto non ho dimensioni di riferimento: non posso stimare distanza e misure. Aggiungilo a oggetti.json.</div>';
   } else {
     box.innerHTML = '<div class="d">' + fmtDist(m.dist) + '<span>distanza · ±' + (kf !== 1 ? '15' : '30') + '%</span></div>' +
       '<div class="dims"><div><b>' + fmtLen(m.h) + '</b>altezza</div><div><b>' + fmtLen(m.w) + '</b>larghezza</div><div><b>' + fmtLen(m.d) + '</b>profondità</div></div>' +
+      (focus.ref && focus.ref !== key(focus.cls) ? '<div class="n">Più probabile: <b style="color:#fff">' + it(focus.refLabel) + '</b> (' + Math.round(focus.refScore * 100) + '%)</div>' : '') +
       '<div class="n">' + (m.cut ? 'Oggetto tagliato dall’inquadratura: stima poco affidabile. ' : '') +
       (kf !== 1 ? 'Distanza calibrata. ' : 'Stima basata sulle dimensioni tipiche di questo tipo di oggetto. ') + 'Valori indicativi.</div>';
   }
@@ -361,7 +417,7 @@ async function loop() {
   if (!paused && video.readyState >= 2 && detector) {
     try {
       lastPreds = await detector.detect(video);
-      if (focus) { track(lastPreds); if (focus.lost > 60) releaseFocus(false); }
+      if (focus) { track(lastPreds); if (focus.lost > 60) releaseFocus(false); else refine(); }
       else autoLockStep();
       redraw();
       const now = performance.now();
