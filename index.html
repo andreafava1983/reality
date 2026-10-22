@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Analizzatore della realtà v5</title>
+<title>Analizzatore della realtà v6</title>
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <style>
   :root { --bg:#0a0a0c; --fg:#f2f2f2; --muted:#9a9aa3; --red:#ff2a2a; --panel:rgba(10,10,12,.72); }
@@ -39,14 +39,22 @@
   #msg h1 { font-size:26px; margin:0; letter-spacing:-.01em; }
   #msg p { margin:0; color:var(--muted); max-width:34ch; line-height:1.5; }
   #msg small { color:var(--muted); font-size:12px; max-width:36ch; line-height:1.4; }
+  #zoomctl { display:flex; align-items:center; gap:4px; pointer-events:auto; padding:3px 6px; }
+  #zoomctl button { border:none; background:none; font-size:22px; padding:0 12px; line-height:1.2; }
+  #zoomval { min-width:44px; text-align:center; font-size:14px; }
+  #teach { position:fixed; inset:0; z-index:50; background:rgba(0,0,0,.65); display:flex; align-items:center; justify-content:center; padding:20px; }
+  #teach .card { background:#1a1a1f; border-radius:20px; padding:20px; width:min(92vw,380px); display:flex; flex-direction:column; gap:12px; }
+  #teach h2 { margin:0; font-size:20px; } #teach p { margin:0; color:var(--muted); font-size:14px; line-height:1.4; }
+  #teach input { font:inherit; font-size:16px; color:var(--fg); background:#0a0a0c; border:1px solid rgba(255,255,255,.2); border-radius:12px; padding:12px; }
+  #teach .btns { display:flex; gap:10px; justify-content:flex-end; }
   .hidden { display:none !important; }
 </style>
 </head>
 <body>
 <div id="msg">
   <h1>Analizzatore della realtà</h1>
-  <small>Versione 5 · vocabolario esteso con database oggetti.json</small>
-  <p id="msgtext">Inquadra ciò che ti circonda: gli oggetti riconosciuti vengono cerchiati in rosso, con il loro nome. Toccane uno per metterlo a fuoco.</p>
+  <small>Versione 6 · aggancio manuale, zoom, riconoscimento forzato</small>
+  <p id="msgtext">Inquadra ciò che ti circonda: gli oggetti riconosciuti vengono cerchiati in rosso. Tocca un rettangolo per agganciarlo, o un punto qualsiasi per forzare il riconoscimento.</p>
   <button class="primary" id="start">Attiva la fotocamera</button>
   <small>Modello: EfficientDet-Lite2 + EfficientNet-Lite0 (Google MediaPipe), con COCO-SSD come riserva. Nomi e misure da oggetti.json.</small>
 </div>
@@ -61,6 +69,7 @@
     <div class="pill" id="fps">– fps</div>
   </div>
   <div id="model" class="pill">Modello: <b>–</b></div>
+  <div id="zoomctl" class="pill"><button id="zout" aria-label="Riduci zoom">−</button><span id="zoomval">1.0×</span><button id="zin" aria-label="Aumenta zoom">+</button></div>
 </div>
 <div id="dock" class="hidden">
   <div id="info" class="hidden"></div>
@@ -69,10 +78,18 @@
 <div id="bar" class="hidden">
   <button id="flip">Cambia camera</button>
   <button id="pause">Pausa</button>
-  <button id="auto">Auto: sì</button>
   <button id="calib" class="hidden">Calibra</button>
+  <button id="export">Esporta DB</button>
   <button id="release" class="primary hidden">Rilascia</button>
 </div>
+
+<div id="teach" class="hidden"><div class="card">
+  <h2>Riconoscimento manuale</h2>
+  <p>In un minuto non sono riuscito a riconoscere quest’area. Come si chiama l’oggetto? Lo imparerò per le prossime volte.</p>
+  <input id="tname" placeholder="Nome (es. caffettiera)" autocomplete="off">
+  <input id="tsize" placeholder="Misure in cm, facoltative (es. 25x15x12)" autocomplete="off">
+  <div class="btns"><button id="tcancel">Annulla</button><button class="primary" id="tsave">Salva e impara</button></div>
+</div></div>
 
 <script type="module">
 const IT = {person:"persona",bicycle:"bicicletta",car:"auto",motorcycle:"moto",airplane:"aereo",bus:"autobus",train:"treno",truck:"camion",boat:"barca","traffic light":"semaforo","fire hydrant":"idrante","stop sign":"segnale di stop","parking meter":"parchimetro",bench:"panchina",bird:"uccello",cat:"gatto",dog:"cane",horse:"cavallo",sheep:"pecora",cow:"mucca",elephant:"elefante",bear:"orso",zebra:"zebra",giraffe:"giraffa",backpack:"zaino",umbrella:"ombrello",handbag:"borsa",tie:"cravatta",suitcase:"valigia",frisbee:"frisbee",skis:"sci",snowboard:"snowboard","sports ball":"pallone",kite:"aquilone","baseball bat":"mazza da baseball","baseball glove":"guanto da baseball",skateboard:"skateboard",surfboard:"tavola da surf","tennis racket":"racchetta da tennis",bottle:"bottiglia","wine glass":"calice",cup:"tazza",fork:"forchetta",knife:"coltello",spoon:"cucchiaio",bowl:"ciotola",banana:"banana",apple:"mela",sandwich:"panino",orange:"arancia",broccoli:"broccoli",carrot:"carota","hot dog":"hot dog",pizza:"pizza",donut:"ciambella",cake:"torta",chair:"sedia",couch:"divano","potted plant":"pianta in vaso",bed:"letto","dining table":"tavolo",toilet:"water",tv:"televisore",laptop:"portatile",mouse:"mouse",remote:"telecomando",keyboard:"tastiera","cell phone":"telefono",microwave:"microonde",oven:"forno",toaster:"tostapane",sink:"lavandino",refrigerator:"frigorifero",book:"libro",clock:"orologio",vase:"vaso",scissors:"forbici","teddy bear":"orsacchiotto","hair drier":"asciugacapelli",toothbrush:"spazzolino"};
@@ -96,7 +113,9 @@ const video = $('video'), canvas = $('overlay'), ctx = canvas.getContext('2d');
 let detector = null;            // { name, detect(video) -> [{bbox:[x,y,w,h], class, score}] }
 let stream, facing = 'environment', paused = false, running = false;
 let lastTs = performance.now(), fpsSmooth = 0, lastPreds = [], view = null;
-let focus = null;               // { cls, box, score, lost, dist }
+let focus = null;               // { cls, box, score, lost, dist, hold }
+let forced = null, pending = null, userDB = [], dbJson = null, zoom = 1, hwZoom = null, dz = 1;
+const EMB = [];                 // impronte visive degli oggetti insegnati
 
 const setStatus = t => { $('msgtext').textContent = t; };
 const withTimeout = (p, ms, label) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(label + ' (timeout)')), ms))]);
@@ -106,7 +125,7 @@ const loadScript = src => new Promise((res, rej) => { const s = document.createE
 async function loadMediaPipe() {
   setStatus('Carico EfficientDet-Lite2…');
   const base = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
-  const { FilesetResolver, ObjectDetector, ImageClassifier } = await withTimeout(import(base + '/vision_bundle.mjs'), 20000, 'libreria MediaPipe');
+  const { FilesetResolver, ObjectDetector, ImageClassifier, ImageEmbedder } = await withTimeout(import(base + '/vision_bundle.mjs'), 20000, 'libreria MediaPipe');
   const fileset = await withTimeout(FilesetResolver.forVisionTasks(base + '/wasm'), 20000, 'motore MediaPipe');
   const modelUrl = 'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite2/float32/1/efficientdet_lite2.tflite';
   const make = delegate => ObjectDetector.createFromOptions(fileset, {
@@ -121,17 +140,24 @@ async function loadMediaPipe() {
       baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/image_classifier/efficientnet_lite0/float32/1/efficientnet_lite0.tflite' },
       maxResults: 3, runningMode: 'IMAGE' }), 30000, 'classificatore');
   } catch (e) { console.warn('Classificatore non disponibile', e); }
+  let emb = null;       // impronta visiva: serve a riconoscere gli oggetti insegnati dall'utente
+  try {
+    emb = await withTimeout(ImageEmbedder.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/image_embedder/mobilenet_v3_small/float32/1/mobilenet_v3_small.tflite' },
+      runningMode: 'IMAGE', l2Normalize: true }), 30000, 'embedder');
+  } catch (e) { console.warn('Embedder non disponibile', e); }
   const cv = document.createElement('canvas'); cv.width = cv.height = 224;
   const cx = cv.getContext('2d');
   return {
-    name: 'EfficientDet-Lite2' + (clf ? ' + EfficientNet-Lite0' : '') + ' · MediaPipe',
-    classify: clf ? (v, b) => {
+    name: 'EfficientDet-Lite2' + (clf ? ' + EfficientNet-Lite0' : '') + (emb ? ' + MobileNetV3' : '') + ' · MediaPipe',
+    crop: (v, b) => {
       const m = 0.08, x = Math.max(0, b[0] - b[2] * m), y = Math.max(0, b[1] - b[3] * m);
       const w = Math.min(v.videoWidth - x, b[2] * (1 + 2 * m)), h = Math.min(v.videoHeight - y, b[3] * (1 + 2 * m));
       cx.drawImage(v, x, y, w, h, 0, 0, 224, 224);
-      const c = clf.classify(cv).classifications[0].categories[0];
-      return { label: c.categoryName, score: c.score };
-    } : null,
+      return cv;
+    },
+    classify: clf ? c => { const r = clf.classify(c).classifications[0].categories[0]; return { label: r.categoryName, score: r.score }; } : null,
+    embed: emb ? c => Array.from(emb.embed(c).embeddings[0].floatEmbedding) : null,
     detect: v => od.detectForVideo(v, performance.now()).detections.map(d => ({
       bbox: [d.boundingBox.originX, d.boundingBox.originY, d.boundingBox.width, d.boundingBox.height],
       class: d.categories[0].categoryName, score: d.categories[0].score }))
@@ -158,14 +184,39 @@ async function loadDetector() {
   catch (e) { console.warn('MediaPipe non disponibile:', e); return await loadCocoSsd(); }
 }
 
+/* ---------- Zoom ---------- */
+function setZoom(z) {
+  const lo = hwZoom ? hwZoom.min : 1, hi = hwZoom ? hwZoom.max : 5;
+  zoom = Math.min(hi, Math.max(lo, z)); dz = 1;
+  if (hwZoom) stream.getVideoTracks()[0].applyConstraints({ advanced: [{ zoom }] }).catch(() => {});
+  else dz = zoom;                                          // altrimenti zoom digitale
+  video.style.transform = (facing === 'user' ? 'scaleX(-1) ' : '') + 'scale(' + dz + ')';
+  $('zoomval').textContent = zoom.toFixed(1) + '×';
+}
+$('zin').onclick = () => setZoom(zoom + 0.5);
+$('zout').onclick = () => setZoom(zoom - 0.5);
+
+const zc = document.createElement('canvas'), zx = zc.getContext('2d');
+function frameSource() {   // con lo zoom digitale il rilevatore lavora solo sulla parte visibile, quindi vede gli oggetti più grandi
+  if (dz <= 1.01) return { src: video, ox: 0, oy: 0 };
+  const vw = video.videoWidth, vh = video.videoHeight, cw = Math.round(vw / dz), ch = Math.round(vh / dz);
+  const x0 = (vw - cw) / 2, y0 = (vh - ch) / 2;
+  if (zc.width !== cw || zc.height !== ch) { zc.width = cw; zc.height = ch; }
+  zx.drawImage(video, x0, y0, cw, ch, 0, 0, cw, ch);
+  return { src: zc, ox: x0, oy: y0 };
+}
+
 /* ---------- Fotocamera ---------- */
 async function startCamera() {
   if (stream) stream.getTracks().forEach(t => t.stop());
   stream = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
   video.srcObject = stream;
-  video.style.transform = canvas.style.transform = facing === 'user' ? 'scaleX(-1)' : 'none';
+  canvas.style.transform = facing === 'user' ? 'scaleX(-1)' : 'none';
   await video.play();
+  const tr = stream.getVideoTracks()[0], caps = tr.getCapabilities ? tr.getCapabilities() : {};
+  hwZoom = caps.zoom ? { min: caps.zoom.min, max: Math.min(caps.zoom.max, 8) } : null;   // zoom ottico/hardware se disponibile
+  setZoom(1);
 }
 
 function fail(text) {
@@ -182,6 +233,7 @@ $('start').onclick = async () => {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('nocam');
     detector = detector || await loadDetector();
     dbCount = await loadDB();
+    loadUser();
     setStatus('Avvio la fotocamera…');
     await startCamera();
   } catch (e) {
@@ -202,9 +254,8 @@ $('pause').onclick = () => { paused = !paused; $('pause').textContent = paused ?
 $('release').onclick = () => releaseFocus();
 
 /* ---------- Messa a fuoco ---------- */
-function releaseFocus(manual = true) {
-  focus = null; candidate = null;
-  if (manual) cooldownUntil = performance.now() + 3000;   // dopo "Rilascia" l'aggancio automatico aspetta 3 s
+function releaseFocus() {
+  focus = null; forced = null;
   refreshUI();
   $('count').innerHTML = 'Oggetti: <b>' + lastPreds.length + '</b>';
   redraw();
@@ -216,8 +267,8 @@ canvas.addEventListener('pointerdown', ev => {
   let x = ev.clientX - r.left; const y = ev.clientY - r.top;
   if (facing === 'user') x = r.width - x;                       // canvas speculare
   const vx = (x - view.ox) / view.s, vy = (y - view.oy) / view.s;   // coordinate video
-  const hits = lastPreds.filter(p => vx >= p.bbox[0] && vx <= p.bbox[0] + p.bbox[2] && vy >= p.bbox[1] && vy <= p.bbox[1] + p.bbox[3]);
-  if (!hits.length) { $('hinttext').textContent = 'Tocca dentro un rettangolo rosso'; return; }
+  const hits = lastPreds.filter(p => p.score >= 0.5 && vx >= p.bbox[0] && vx <= p.bbox[0] + p.bbox[2] && vy >= p.bbox[1] && vy <= p.bbox[1] + p.bbox[3]);
+  if (!hits.length) { startForce(vx, vy); redraw(); return; }
   hits.sort((a, b) => a.bbox[2] * a.bbox[3] - b.bbox[2] * b.bbox[3]);   // il più piccolo sotto il dito
   lockOn(hits[0]);
   redraw();
@@ -247,8 +298,8 @@ function track(preds) {
 }
 
 /* ---------- Aggancio automatico, distanza e misure ---------- */
-const AUTO_SCORE = 0.75, FOV_LONG = 67 * Math.PI / 180;   // campo visivo tipico di un iPhone sul lato lungo
-let autoLock = true, cooldownUntil = 0, candidate = null, kf = 1;
+const FOV_LONG = 67 * Math.PI / 180;   // campo visivo tipico di un iPhone sul lato lungo
+let kf = 1;
 try { const k = parseFloat(localStorage.getItem('ar_kf')); if (k > 0.3 && k < 3) kf = k; } catch (e) {}
 
 // dimensioni tipiche in cm: [lato maggiore, lato medio, lato minore]
@@ -260,8 +311,10 @@ const sizeOf = f => (f.ref && SIZE[key(f.ref)]) || SIZE[key(f.cls)];
 async function loadDB() {   // database esterno: oggetti.json accanto a questa pagina
   try {
     const j = await withTimeout(fetch('oggetti.json?v=' + Date.now(), { cache: 'no-store' }).then(r => r.json()), 8000, 'database');
+    dbJson = j;
     for (const [k, e] of Object.entries(j.oggetti || {})) {
       const kk = k.toLowerCase();
+      if (e.emb) EMB.push({ k: kk, v: e.emb });
       if (e.it) IT[kk] = e.it;
       if (e.size) SIZE[kk] = e.size;
       (e.alias || []).forEach(a => { ALIAS[a.toLowerCase()] = kk; });
@@ -270,15 +323,82 @@ async function loadDB() {   // database esterno: oggetti.json accanto a questa p
   } catch (e) { console.warn('oggetti.json non caricato', e); return 0; }
 }
 
+const cosine = (a, b) => { let d = 0, na = 0, nb = 0; for (let i = 0; i < a.length; i++) { d += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; } return d / Math.sqrt(na * nb || 1); };
+
+function identify(box, minScore) {   // 1) oggetti insegnati (impronta visiva)  2) 1000 categorie del classificatore
+  if (!detector.crop) return {};
+  const cv = detector.crop(video, box), v = detector.embed ? detector.embed(cv) : null;
+  if (v && EMB.length) {
+    let best = null, bs = 0;
+    for (const e of EMB) { const sc = cosine(v, e.v); if (sc > bs) { bs = sc; best = e; } }
+    if (best && bs >= 0.78) return { label: best.k, score: bs, v };
+  }
+  const c = detector.classify ? detector.classify(cv) : null;
+  return c && c.score >= minScore ? { label: c.label, score: c.score, v } : { v };
+}
+
 function refine() {         // ogni 0,8 s riclassifica il ritaglio dell'oggetto agganciato
-  if (!focus || !detector.classify || focus.cls === 'person' || performance.now() - lastRefine < 800) return;
+  if (!focus || focus.cls === 'person' || performance.now() - lastRefine < 800) return;
   lastRefine = performance.now();
   try {
-    const r = detector.classify(video, focus.box);
-    if (r.score >= 0.45) { focus.ref = key(r.label); focus.refLabel = r.label; focus.refScore = r.score; it(r.label); }
-    else focus.ref = null;
+    const r = identify(focus.box, 0.45);
+    if (r.label) { focus.ref = key(r.label); focus.refLabel = r.label; focus.refScore = r.score; it(r.label); } else focus.ref = null;
   } catch (e) {}
 }
+
+/* ---------- Riconoscimento forzato e apprendimento ---------- */
+function regionAt(cx, cy) {
+  const side = Math.min(video.videoWidth, video.videoHeight) * 0.35 / dz;
+  return [Math.min(video.videoWidth - side, Math.max(0, cx - side / 2)), Math.min(video.videoHeight - side, Math.max(0, cy - side / 2)), side, side];
+}
+function startForce(cx, cy) {
+  focus = null;
+  forced = { cx, cy, t0: performance.now(), last: 0, box: regionAt(cx, cy), v: null };
+  refreshUI();
+}
+function forceStep() {      // riprova ogni 0,7 s sull'area toccata, per al massimo 60 s
+  const now = performance.now();
+  if (now - forced.t0 > 60000) return showTeach();
+  $('hinttext').textContent = 'Provo a riconoscere quest’area… ' + Math.ceil((60000 - (now - forced.t0)) / 1000) + ' s';
+  if (now - forced.last < 700 || !detector.crop) return;
+  forced.last = now; forced.box = regionAt(forced.cx, forced.cy);
+  try {
+    const r = identify(forced.box, 0.3);
+    if (r.v) forced.v = r.v;
+    if (r.label) { it(r.label); lockOn({ class: key(r.label), bbox: forced.box, score: r.score }, true); }
+  } catch (e) {}
+}
+function showTeach() {
+  pending = { box: forced.box, v: forced.v };
+  forced = null; refreshUI();
+  $('tname').value = ''; $('tsize').value = '';
+  $('teach').classList.remove('hidden');
+}
+function applyUser(i) { IT[i.k] = i.it; if (i.size) SIZE[i.k] = i.size; if (i.emb) EMB.push({ k: i.k, v: i.emb }); }
+function loadUser() {
+  try { userDB = JSON.parse(localStorage.getItem('ar_user') || '[]'); } catch (e) { userDB = []; }
+  userDB.forEach(applyUser);
+}
+$('tcancel').onclick = () => { $('teach').classList.add('hidden'); pending = null; };
+$('tsave').onclick = () => {
+  const name = $('tname').value.trim();
+  if (!name || !pending) return;
+  const nums = ($('tsize').value.match(/\d+(?:[.,]\d+)?/g) || []).map(n => parseFloat(n.replace(',', '.'))).filter(n => n > 0).sort((a, b) => b - a).slice(0, 3);
+  let size = null;
+  if (nums.length) { const a = nums[0], b = nums[1] || a * 0.6; size = [a, b, nums[2] || b * 0.6]; }
+  const item = { k: name.toLowerCase(), it: name, size, emb: pending.v ? pending.v.map(x => +x.toFixed(3)) : null };
+  userDB.push(item); applyUser(item);
+  try { localStorage.setItem('ar_user', JSON.stringify(userDB)); } catch (e) {}
+  lockOn({ class: item.k, bbox: pending.box, score: 1 }, true);
+  $('teach').classList.add('hidden'); pending = null;
+};
+$('export').onclick = () => {   // scarica oggetti.json aggiornato con ciò che hai insegnato: caricalo su GitHub al posto del vecchio
+  const out = JSON.parse(JSON.stringify(dbJson || { versione: 1, oggetti: {} }));
+  for (const i of userDB) out.oggetti[i.k] = { it: i.it, size: i.size || undefined, emb: i.emb || undefined };
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(out)], { type: 'application/json' }));
+  a.download = 'oggetti.json'; a.click();
+};
 
 const baseFpx = () => Math.max(video.videoWidth, video.videoHeight) / (2 * Math.tan(FOV_LONG / 2));
 const fmtLen = cm => cm >= 100 ? (cm / 100).toFixed(2).replace('.', ',') + ' m' : (cm >= 10 ? String(Math.round(cm)) : cm.toFixed(1).replace('.', ',')) + ' cm';
@@ -288,22 +408,20 @@ function layout() { $('dock').style.bottom = $('bar').offsetHeight + 'px'; }
 addEventListener('resize', layout);
 
 function refreshUI() {
-  $('release').classList.toggle('hidden', !focus);
+  $('release').classList.toggle('hidden', !focus && !forced);
   $('calib').classList.toggle('hidden', !focus);
-  $('auto').textContent = 'Auto: ' + (autoLock ? 'sì' : 'no');
   $('hint').classList.toggle('hidden', !!focus);
-  $('hinttext').textContent = autoLock ? 'Aggancio automatico oltre il 75% · oppure tocca un oggetto' : 'Tocca un oggetto per metterlo a fuoco';
+  $('hinttext').textContent = forced ? 'Provo a riconoscere quest’area…' : 'Tocca un rettangolo rosso per agganciarlo, o un punto qualsiasi per forzare il riconoscimento';
   if (!focus) $('info').classList.add('hidden');
   layout();
 }
 
-function lockOn(p) {
-  focus = { cls: p.class, box: p.bbox.slice(), score: p.score, lost: 0, dist: null };
-  candidate = null;
+function lockOn(p, hold) {
+  focus = { cls: p.class, box: p.bbox.slice(), score: p.score, lost: 0, dist: null, hold: !!hold };
+  forced = null;
   refreshUI();
 }
 
-$('auto').onclick = () => { autoLock = !autoLock; candidate = null; refreshUI(); };
 
 $('calib').onclick = () => {
   if (!focus || !sizeOf(focus)) return;
@@ -342,25 +460,13 @@ function updateInfo() {
   box.classList.remove('hidden');
 }
 
-function autoLockStep() {
-  if (focus || !autoLock || performance.now() < cooldownUntil) return;
-  const c = lastPreds.filter(p => p.score >= AUTO_SCORE);
-  if (!c.length) { candidate = null; return; }
-  const cx = video.videoWidth / 2, cy = video.videoHeight / 2;
-  const dc = p => Math.hypot(p.bbox[0] + p.bbox[2] / 2 - cx, p.bbox[1] + p.bbox[3] / 2 - cy);
-  c.sort((a, b) => dc(a) - dc(b));                       // sceglie l'oggetto più vicino al centro dell'inquadratura
-  const p = c[0];
-  if (candidate && candidate.cls === p.class && iou(candidate.box, p.bbox) > 0.3) { candidate.n++; candidate.box = p.bbox; }
-  else candidate = { cls: p.class, box: p.bbox, n: 1 };
-  if (candidate.n >= 3) lockOn(p);                       // 3 fotogrammi consecutivi sopra il 75%
-}
 
 /* ---------- Disegno ---------- */
 function fit() {
   const w = canvas.clientWidth, h = canvas.clientHeight, dpr = window.devicePixelRatio || 1;
   if (canvas.width !== w * dpr || canvas.height !== h * dpr) { canvas.width = w * dpr; canvas.height = h * dpr; }
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  const vw = video.videoWidth || 1, vh = video.videoHeight || 1, s = Math.max(w / vw, h / vh);
+  const vw = video.videoWidth || 1, vh = video.videoHeight || 1, s = Math.max(w / vw, h / vh) * dz;
   return { s, ox: (w - vw * s) / 2, oy: (h - vh * s) / 2, w, h };
 }
 
@@ -383,6 +489,7 @@ function redraw() {
 
   if (!focus) {
     ctx.lineWidth = 3;
+    if (forced && forced.box) { ctx.save(); ctx.setLineDash([8, 6]); ctx.lineWidth = 2; ctx.strokeRect(forced.box[0] * s + ox, forced.box[1] * s + oy, forced.box[2] * s, forced.box[3] * s); ctx.restore(); }
     const shown = lastPreds.filter(p => p.score >= 0.5);
     for (const p of shown) {
       const [bx, by, bw, bh] = p.bbox;
@@ -416,9 +523,10 @@ function redraw() {
 async function loop() {
   if (!paused && video.readyState >= 2 && detector) {
     try {
-      lastPreds = await detector.detect(video);
-      if (focus) { track(lastPreds); if (focus.lost > 60) releaseFocus(false); else refine(); }
-      else autoLockStep();
+      const fs = frameSource(), raw = await detector.detect(fs.src);
+      lastPreds = (fs.ox || fs.oy) ? raw.map(p => ({ ...p, bbox: [p.bbox[0] + fs.ox, p.bbox[1] + fs.oy, p.bbox[2], p.bbox[3]] })) : raw;
+      if (focus) { if (!focus.hold) { track(lastPreds); if (focus.lost > 60) releaseFocus(); } refine(); }
+      else if (forced) forceStep();
       redraw();
       const now = performance.now();
       fpsSmooth = fpsSmooth * 0.8 + (1000 / (now - lastTs)) * 0.2; lastTs = now;
