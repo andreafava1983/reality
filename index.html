@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Analizzatore della realtà v6</title>
+<title>Analizzatore della realtà v7</title>
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <style>
   :root { --bg:#0a0a0c; --fg:#f2f2f2; --muted:#9a9aa3; --red:#ff2a2a; --panel:rgba(10,10,12,.72); }
@@ -53,7 +53,7 @@
 <body>
 <div id="msg">
   <h1>Analizzatore della realtà</h1>
-  <small>Versione 6 · aggancio manuale, zoom, riconoscimento forzato</small>
+  <small>Versione 7 · attesa riconoscimento forzato: 20 s</small>
   <p id="msgtext">Inquadra ciò che ti circonda: gli oggetti riconosciuti vengono cerchiati in rosso. Tocca un rettangolo per agganciarlo, o un punto qualsiasi per forzare il riconoscimento.</p>
   <button class="primary" id="start">Attiva la fotocamera</button>
   <small>Modello: EfficientDet-Lite2 + EfficientNet-Lite0 (Google MediaPipe), con COCO-SSD come riserva. Nomi e misure da oggetti.json.</small>
@@ -85,7 +85,7 @@
 
 <div id="teach" class="hidden"><div class="card">
   <h2>Riconoscimento manuale</h2>
-  <p>In un minuto non sono riuscito a riconoscere quest’area. Come si chiama l’oggetto? Lo imparerò per le prossime volte.</p>
+  <p>In 20 secondi non sono riuscito a riconoscere quest’area. Come si chiama l’oggetto? Lo imparerò per le prossime volte.</p>
   <input id="tname" placeholder="Nome (es. caffettiera)" autocomplete="off">
   <input id="tsize" placeholder="Misure in cm, facoltative (es. 25x15x12)" autocomplete="off">
   <div class="btns"><button id="tcancel">Annulla</button><button class="primary" id="tsave">Salva e impara</button></div>
@@ -347,6 +347,7 @@ function refine() {         // ogni 0,8 s riclassifica il ritaglio dell'oggetto 
 }
 
 /* ---------- Riconoscimento forzato e apprendimento ---------- */
+const FORCE_MS = 20000;   // attesa prima del popup di riconoscimento manuale
 function regionAt(cx, cy) {
   const side = Math.min(video.videoWidth, video.videoHeight) * 0.35 / dz;
   return [Math.min(video.videoWidth - side, Math.max(0, cx - side / 2)), Math.min(video.videoHeight - side, Math.max(0, cy - side / 2)), side, side];
@@ -356,10 +357,10 @@ function startForce(cx, cy) {
   forced = { cx, cy, t0: performance.now(), last: 0, box: regionAt(cx, cy), v: null };
   refreshUI();
 }
-function forceStep() {      // riprova ogni 0,7 s sull'area toccata, per al massimo 60 s
+function forceStep() {      // riprova ogni 0,7 s sull'area toccata, per al massimo FORCE_MS
   const now = performance.now();
-  if (now - forced.t0 > 60000) return showTeach();
-  $('hinttext').textContent = 'Provo a riconoscere quest’area… ' + Math.ceil((60000 - (now - forced.t0)) / 1000) + ' s';
+  if (now - forced.t0 > FORCE_MS) return showTeach();
+  $('hinttext').textContent = 'Provo a riconoscere quest’area… ' + Math.ceil((FORCE_MS - (now - forced.t0)) / 1000) + ' s';
   if (now - forced.last < 700 || !detector.crop) return;
   forced.last = now; forced.box = regionAt(forced.cx, forced.cy);
   try {
